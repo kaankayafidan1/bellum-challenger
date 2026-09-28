@@ -123,11 +123,15 @@ function linie(doc, x, y, b, h, farbe, deckung=1){
 
 /**
  * Zeichnet eine Karte auf die aktuelle Seite.
- * @param d  { edition, area, dateLabel, doorsLabel, categoryLabel,
+ * @param d  { area, dateLabel, doorsLabel, categoryLabel,
  *             block, row, seat, room, serial, codeCaption, qrPng }
+ *
+ * "edition" ist beim Bellum Challenger absichtlich leer - das Logo traegt hier
+ * keine Ziffer. Das Feld wird nirgends gezeichnet und darf deshalb auch nicht
+ * mehr als Pflichtfeld verlangt werden; sonst bricht die Ticketerzeugung ab.
  */
 export function zeichneTicket(doc, d){
-  for (const f of ["edition","area","dateLabel","doorsLabel","categoryLabel",
+  for (const f of ["area","dateLabel","doorsLabel","categoryLabel",
                    "blockLabel","row","seat","room","serial","codeCaption"]) {
     if (typeof d[f] !== "string" || !d[f].trim()) throw new Error("Ticketfeld fehlt: " + f);
   }
