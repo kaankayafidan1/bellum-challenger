@@ -524,9 +524,10 @@ const DUNKEL = "#0d100e";
    ausgeschildert sind. Wo Zahl und Rohwert gleich sind - Empore, alte Zonen -
    steht nur ein Wert. */
 function reiheAufTicket(row, zone){
-  const zahl = reiheAnzeige(row, zone);
-  const roh  = String(row == null ? "" : row).toUpperCase();
-  return (zahl === roh || !roh) ? zahl : zahl + " / " + roh;
+  // Auf dem Ticket steht nur noch die ZAHL. Die Doppelangabe "4 / D" hat
+  // Gaeste verwirrt; im Saal wird durchgezaehlt. In den Daten, im QR-Code
+  // und in der Signatur bleibt der Buchstabe unveraendert stehen.
+  return reiheAnzeige(row, zone);
 }
 
 function platzText(t){
@@ -617,7 +618,7 @@ async function sendTicketMail(email, tickets, sessionId){
 
   const link = `${PUBLIC_URL}/success.html?session_id=${encodeURIComponent(sessionId)}`;
   const anzahl = tickets.length;
-  const betreff = `Dein${anzahl>1?"e":""} Ticket${anzahl>1?"s":""} für die Bellum Challenger`;
+  const betreff = `Dein${anzahl>1?"e":""} Ticket${anzahl>1?"s":""} für Bellum Challenger`;
 
   // PDF mit allen Tickets erzeugen
   let pdfBuffer = null;
