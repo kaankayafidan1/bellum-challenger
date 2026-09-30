@@ -43,6 +43,24 @@ requireEnv("FIREBASE_DATABASE_URL", FIREBASE_DATABASE_URL);
 
 const stripe = new Stripe(STRIPE_SECRET_KEY);
 
+// ---------------------------------------------------------------------------
+//  Termin des Events - EINE Quelle fuer Ticket UND Mail.
+//
+//  Vorher standen Datum und Wochentag an drei Stellen als Text im Server. Im
+//  HTML-Teil der Bestaetigungsmail war der Samstagstermin von BFC 6 stehen
+//  geblieben: jeder Challenger-Kaeufer las dort "17. OKTOBER 2026 - SAMSTAG",
+//  waehrend Ticket und Textteil richtig den 18. Oktober nannten. Damit das
+//  nicht wieder auseinanderlaufen kann, kommt alles von hier.
+// ---------------------------------------------------------------------------
+const TERMIN = {
+  datum:   "18. Oktober 2026",
+  tag:     "Sonntag",
+  ort:     "Saal Maritim",
+  einlass: "12:15 Uhr",
+  kurz:    "So, 18. Oktober 2026"      // so steht es auf dem Ticket
+};
+
+
 admin.initializeApp({
   credential: admin.credential.cert(JSON.parse(FIREBASE_SERVICE_ACCOUNT)),
   databaseURL: FIREBASE_DATABASE_URL
@@ -106,6 +124,25 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
   } catch (err) {
     console.error("Webhook-Signatur ungültig:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // ------------------------------------------------------------------
+  // Gehoert diese Zahlung zu einem ANDEREN Event? Dann nicht anfassen.
+  //
+  // Stripe liefert jedes Ereignis an JEDEN eingerichteten Endpunkt - also
+  // auch an den des anderen Events. Der Endpunkt hier bekommt dadurch auch
+  // die Kaeufe der anderen Verkaufsseite, korrekt signiert, und stellte sie
+  // bisher mit aus. Folge: der Kunde bekam eine zweite Mail mit einem Ticket
+  // fuer den falschen Tag, und derselbe Platz wurde hier als verkauft
+  // markiert, ohne dass ihn jemand gekauft hat.
+  //
+  // Die Kennung setzen wir selbst, wenn wir die Bezahlseite anlegen
+  // (metadata.eventId = EVENT_ID). Stimmt sie nicht, ist es nicht unser Kauf.
+  // ------------------------------------------------------------------
+  const kaufEvent = event.data?.object?.metadata?.eventId;
+  if (kaufEvent && kaufEvent !== EVENT_ID) {
+    console.log(`Webhook ignoriert: Zahlung gehoert zu Event "${kaufEvent}", dieser Server ist "${EVENT_ID}".`);
+    return res.json({ received: true, ignoriert: kaufEvent });
   }
   // Bezahlseite verfallen: die Plätze sofort wieder freigeben.
   if (event.type === "checkout.session.expired") {
@@ -567,8 +604,8 @@ async function buildTicketsPdf(tickets){
     zeichneTicket(doc, {
       edition:       "",          // Logo ohne Ziffer
       area:          t.zone === "Innenraum" ? "Unten" : t.zone === "Empore" ? "Oben" : t.zone,
-      dateLabel:     "So, 18. Oktober 2026",
-      doorsLabel:    "12:30 Uhr",
+      dateLabel:     TERMIN.kurz,
+      doorsLabel:    TERMIN.einlass,
       categoryLabel: blockText(t).toUpperCase(),
       blockLabel:    blockText(t),
       row:           t.zone === "Rollstuhl" ? "—" : reiheAufTicket(t.row, t.zone),
@@ -633,7 +670,7 @@ async function sendTicketMail(email, tickets, sessionId){
   <div style="max-width:600px;margin:0 auto;padding:28px 20px">
     <h1 style="color:#fff;font-size:26px;margin:0 0 6px">Bellum Challenger</h1>
     <p style="color:#5ECB24;font-weight:bold;letter-spacing:.06em;margin:0 0 22px">
-      17. OKTOBER 2026 · SAMSTAG · SAAL MARITIM
+      ${TERMIN.datum.toUpperCase()} · ${TERMIN.tag.toUpperCase()} · ${TERMIN.ort.toUpperCase()} · EINLASS ${TERMIN.einlass.toUpperCase()}
     </p>
 
     <p style="color:#dfe6df;font-size:15px;line-height:1.6;margin:0 0 18px">
@@ -665,7 +702,7 @@ async function sendTicketMail(email, tickets, sessionId){
 
   const text = [
     `Bellum Challenger`,
-    `18. Oktober 2026 · Sonntag · Saal Maritim`,
+    `${TERMIN.datum} · ${TERMIN.tag} · ${TERMIN.ort} · Einlass ${TERMIN.einlass}`,
     ``,
     `vielen Dank für deinen Kauf! Dein${anzahl>1?"e":""} Ticket${anzahl>1?"s":""}:`,
     ...tickets.map(t => {
@@ -824,6 +861,14 @@ async function fulfillOrder(session){
 app.get("/api/tickets-by-session", async (req, res) => {
   const sid = req.query.sid;
   if (!sid) return res.status(400).json({ error: "sid fehlt" });
+  // Diese Kennung wandert ungefiltert in einen Datenbankpfad. Firebase verbietet
+  // dort ".", "#", "$", "[" und "]" und wirft bei einem solchen Zeichen einen
+  // Fehler - aus einem async-Handler heraus beendete das den ganzen Server.
+  // Eine einzige Adresszeile im Browser legte damit den Verkauf lahm.
+  // Eine echte Stripe-Sitzungskennung besteht nur aus Buchstaben, Zahlen und "_".
+  if (typeof sid !== "string" || !/^[A-Za-z0-9_]{1,250}$/.test(sid)) {
+    return res.status(400).json({ error: "sid ungültig" });
+  }
   for (let i = 0; i < 12; i++) {
     const marker = await db.ref(`events/${EVENT_ID}/issued/${sid}`).get();
     if (marker.exists()) {
@@ -838,6 +883,19 @@ app.get("/api/tickets-by-session", async (req, res) => {
     await new Promise(r => setTimeout(r, 1000));
   }
   res.json({ ready: false });
+});
+
+// ---------------------------------------------------------------------------
+//  Letztes Sicherheitsnetz.
+//
+//  Express faengt Fehler aus async-Handlern nicht ab. Node beendet den Prozess
+//  bei einer unbehandelten Zurueckweisung - eine einzelne fehlerhafte Anfrage
+//  hat so den gesamten Verkaufsserver gestoppt. Hier wird sie protokolliert,
+//  der Verkauf laeuft weiter. Die betroffene Anfrage bleibt ohne Antwort; der
+//  Kunde kann sie einfach wiederholen.
+// ---------------------------------------------------------------------------
+process.on("unhandledRejection", (err) => {
+  console.error("Unbehandelter Fehler (Server laeuft weiter):", err && err.stack || err);
 });
 
 app.listen(PORT, () => {
