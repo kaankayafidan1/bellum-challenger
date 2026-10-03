@@ -248,7 +248,7 @@ aside{width:330px;flex-shrink:0;border-left:1px solid var(--line);
 .adminband .warn{color:#FCA5A5}
 .adminlegende{display:flex;gap:12px;flex-wrap:wrap;margin:2px 0 10px;font-size:12px;color:var(--mute)}
 .adminlegende span{display:flex;align-items:center;gap:6px}
-.adminlegende i{width:12px;height:12px;border-radius:3px;display:inline-block}
+.adminlegende i{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid rgba(16,21,28,.22)}
 .admintab{width:100%;border-collapse:collapse;font-size:12.5px}
 .admintab th,.admintab td{text-align:right;padding:4px 6px;border-bottom:1px solid var(--line)}
 .admintab th:first-child,.admintab td:first-child{text-align:left}
@@ -285,6 +285,24 @@ aside{width:330px;flex-shrink:0;border-left:1px solid var(--line);
 /* In der Verkaufsuebersicht wird nichts zurueckgenommen: dort zaehlt jeder
    einzelne Stuhl, und das Bestellfeld mit dem Aufheben-Knopf ist dort aus. */
 body.uebersicht #plan .seat,body.uebersicht #plan .blocklbl{opacity:1}
+
+/* ---- Verkaufsuebersicht: der Plan zeigt den STAND, nicht den Preis -------
+   Die Preisfarben sind hier Laerm. Gefragt ist, WO schon verkauft ist - und
+   ein schwarzer Punkt zwischen kraeftigem Blau, Orange und Rot geht unter.
+   Deshalb treten in der Uebersicht die freien Plaetze zurueck und die
+   verkauften kommen nach vorne. Alle Regeln haengen an body.uebersicht; die
+   Klasse gibt es nur mit Schluessel, fuer Kaeufer aendert sich nichts.
+   Die Reihenfolge der Regeln zaehlt: body.uebersicht .seat ist spezifischer
+   als .seat.a-verkauft, deshalb muessen die Standfarben ebenfalls mit
+   body.uebersicht beginnen - sonst faerbt die Grundregel sie zu. */
+body.uebersicht .seat{fill:#E7ECE6!important;stroke:#C7D0C6}
+body.uebersicht .seat.a-zu{fill:#F3F5F7!important;stroke:#E1E6EB}
+body.uebersicht .seat.a-res{fill:#F59E0B!important;stroke:#92400E}
+body.uebersicht .seat.a-verkauft{fill:#C81E1E!important;stroke:#7A0F0F;stroke-width:1.2px}
+/* Von der Uebersicht aus wird nicht gekauft - der Knopf waere hier nur eine
+   Falle. Und die Preisliste stimmt nicht mehr, weil der Plan umgefaerbt ist. */
+body.uebersicht .foot{display:none}
+body.uebersicht .legendsec{display:none}
 
 .blocklbl{pointer-events:none;user-select:none}
 /* Am Block steht nur noch sein Name. Der Preis stuende dort doppelt - er sagt
@@ -500,10 +518,10 @@ aside{background:#fff}
       <div class="picked hidden" id="adminfeld">
         <h2>Verkaufsstand</h2>
         <div class="adminlegende">
-          <span><i style="background:#111827"></i>verkauft</span>
+          <span><i style="background:#C81E1E"></i>verkauft</span>
           <span><i style="background:#F59E0B"></i>reserviert</span>
-          <span><i style="background:#CBD5E1"></i>gesperrt</span>
-          <span><i style="background:#26A69A"></i>frei</span>
+          <span><i style="background:#F3F5F7"></i>gesperrt</span>
+          <span><i style="background:#E7ECE6"></i>frei</span>
         </div>
         <table class="admintab"><thead><tr>
           <th>Block</th><th>verkauft</th><th>frei</th><th>gesperrt</th>
@@ -1996,7 +2014,9 @@ async function adminLaden(){
 }
 if(adminKey){
   adminLaden();
-  setInterval(() => { if(!document.hidden) adminLaden(); }, 25000);
+  // Alle 10 Sekunden statt alle 25: die Uebersicht soll waehrend des
+  // Verkaufs mitlaufen. Nur wenn das Fenster vorne ist.
+  setInterval(() => { if(!document.hidden) adminLaden(); }, 10000);
 }
 
 window.BFC_SAALPLAN = {
