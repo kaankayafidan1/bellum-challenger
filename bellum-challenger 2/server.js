@@ -287,6 +287,22 @@ app.get("/api/blocks", async (req, res) => {
  * Plaetze frei sind, und dort der fruehstmoegliche Lauf. So bleibt der Block
  * kompakt belegt statt ueber alle Reihen verstreut.
  */
+// Ein Reihenschritt zaehlt bei der Verteilung wie zwei Plaetze: im Saal liegen
+// die Reihen weiter auseinander als zwei Stuehle nebeneinander.
+const REIHENSCHRITT = 2;
+
+// Bis zu welchem Fuellgrad eines Bereichs wird VERTEILT statt aufgefuellt?
+//
+// Gemessen am ganzen Saal: Verteilen kostet keine Plaetze - der Saal wird am
+// Ende genauso voll. Was leidet, ist etwas anderes: je mehr verteilt wurde,
+// desto schwerer findet spaeter eine grosse Gruppe noch Plaetze am Stueck.
+// Bei durchgehendem Verteilen faellt die Chance einer Sechsergruppe (Saal zu
+// 70 % verkauft) von 31 % auf 10 %. Bei dieser Schwelle bleibt sie bei 24 %,
+// und der leere Saal sieht trotzdem gleichmaessig besetzt aus - genau in dem
+// Bereich, in dem es auffaellt. Eine Zahl, eine Wirkung: hoeher = mehr
+// verteilt, niedriger = frueher aufgefuellt.
+const VERTEILEN_BIS = 0.40;
+
 async function waehleNebeneinander(zone, block, anzahl, buyerKey, preis){
   // Doppelt gesichert: ein Abendkassen-Block wird schon im Kaufweg abgewiesen,
   // hier aber noch einmal - damit die Funktion nirgends versehentlich Plaetze
@@ -300,49 +316,131 @@ async function waehleNebeneinander(zone, block, anzahl, buyerKey, preis){
   const sold = soldSnap.val() || {};
   const reservations = resSnap.val() || {};
 
-  const frei = (row, seat) => {
-    if (isRowBlocked(zone, block, row)) return false;
-    if (isSeatBlocked(zone, block, row, seat)) return false;
+  const rang = r => /^\d+$/.test(r) ? Number(r) : "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(r) + 1;
+
+  // Sitzt dort schon jemand? Einzeln gesperrte Plaetze zaehlen mit: das sind
+  // die umgebuchten Gaeste aus der ring°arena, die dort wirklich sitzen. Eine
+  // komplett gesperrte Reihe ist dagegen eine leere Stuhlreihe - sie kommt
+  // weiter unten gar nicht erst in die Betrachtung.
+  const vergeben = (row, seat) => {
+    if (isSeatBlocked(zone, block, row, seat)) return true;
     const k = fbKey(seatId(zone, block, row, seat));
-    if (sold[k]) return false;
+    if (sold[k]) return true;
     const r = reservations[k];
     // Die eigene, noch laufende Reservierung darf ueberschrieben werden.
-    if (r && r.until > now && r.buyerKey !== buyerKey) return false;
-    return true;
+    return !!(r && r.until > now && r.buyerKey !== buyerKey);
   };
 
-  // Reihen in Hallenreihenfolge: Ziffern numerisch, Buchstaben alphabetisch.
+  // Nur die Reihen, die fuer diese Bestellung ueberhaupt in Frage kommen.
+  // Ist eine Preisstufe gewaehlt, zaehlen nur Reihen dieser Stufe - sonst
+  // bekaeme jemand, der "89 EUR" gewaehlt hat, einen Platz aus Reihe A zu
+  // 149 EUR und saehe erst bei Stripe den richtigen Betrag.
   const reihen = [];
   for (const s of seatsOf(zone, block)) {
+    if (isRowBlocked(zone, block, s.row)) continue;
+    if (preis && seatPrice(zone, block, s.row) !== preis) continue;
     let r = reihen.find(x => x.row === s.row);
     if (!r) { r = { row: s.row, sitze: [] }; reihen.push(r); }
     r.sitze.push(s.seat);
   }
-  const rang = r => /^\d+$/.test(r) ? Number(r) : "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(r) + 1;
   reihen.sort((a, b) => rang(a.row) - rang(b.row));
+  if (!reihen.length) return null;
 
+  // Wie voll ist dieser Bereich, und wo sitzen die Leute?
+  let plaetze = 0, besetzteAnzahl = 0;
+  const besetzt = [];
+  for (const r of reihen) for (const n of r.sitze) {
+    plaetze++;
+    if (vergeben(r.row, n)) { besetzteAnzahl++; besetzt.push({ rr: rang(r.row), n: Number(n) }); }
+  }
+  const verteilen = plaetze > 0 && (besetzteAnzahl / plaetze) < VERTEILEN_BIS;
+
+  // ---- Alle Plaetze sammeln, die fuer diese Bestellung in Frage kommen ----
+  // Eine Bestellung bleibt IMMER zusammen: fortlaufende Nummern in einer Reihe.
+  // Wer vier Tickets kauft, sitzt zu viert nebeneinander. Verteilt wird
+  // zwischen den Bestellungen, nie innerhalb einer.
+  const kandidaten = [];
   for (const r of reihen) {
-    // Ist eine Preisstufe gewaehlt, kommen nur Reihen dieser Stufe in Frage.
-    // Sonst bekaeme jemand, der "89 EUR" gewaehlt hat, einen Platz aus Reihe A
-    // zu 149 EUR - und erst bei Stripe den richtigen Betrag zu sehen.
-    if (preis && seatPrice(zone, block, r.row) !== preis) continue;
     const nummern = r.sitze.slice().sort((a, b) => a - b);
+    const freiSet = new Set(nummern.filter(n => !vergeben(r.row, n)));
+    // Wie viele freie Plaetze liegen ab "von" am Stueck in Richtung "schritt"?
+    const kette = (von, schritt) => { let c = 0, n = von; while (freiSet.has(n)) { c++; n += schritt; } return c; };
     for (let i = 0; i + anzahl <= nummern.length; i++) {
       const lauf = nummern.slice(i, i + anzahl);
       // Nur echte Nachbarn: fortlaufende Nummern, keine Luecke im Hallenplan.
       let zusammen = true;
       for (let j = 1; j < lauf.length; j++) if (lauf[j] !== lauf[j-1] + 1) { zusammen = false; break; }
       if (!zusammen) continue;
-      if (!lauf.every(n => frei(r.row, n))) continue;
-      return lauf.map(n => ({
-        id: seatId(zone, block, r.row, n),
-        zone, block, row: r.row,
-        seat: String(n).padStart(2, "0"),
-        price: seatPrice(zone, block, r.row)
-      }));
+      if (!lauf.every(n => freiSet.has(n))) continue;
+      const linksRest  = kette(lauf[0] - 1, -1);
+      const rechtsRest = kette(lauf[lauf.length - 1] + 1, +1);
+      kandidaten.push({
+        row: r.row, rr: rang(r.row), lauf, linksRest, rechtsRest,
+        rest: linksRest + rechtsRest,
+        buendig: (linksRest === 0 || rechtsRest === 0),
+        mitte: (lauf[0] + lauf[lauf.length - 1]) / 2,
+        reiheMitte: (nummern[0] + nummern[nummern.length - 1]) / 2
+      });
     }
   }
-  return null;
+  if (!kandidaten.length) return null;
+
+  let beste = null;
+
+  if (verteilen) {
+    // ---- Noch viel frei: VERTEILEN ------------------------------------
+    // Frueher nahm diese Funktion einfach den ersten freien Platz von vorne
+    // links; dadurch klumpte sich der ganze Verkauf in einer Ecke zusammen,
+    // waehrend der Rest leer blieb. Jetzt wird der Platz gewaehlt, der von
+    // allen schon besetzten am weitesten weg liegt.
+    // Einen einzelnen freien Platz daneben lassen wir dabei nicht stehen -
+    // den bestellt praktisch niemand mehr.
+    const ohneEinzelluecke = kandidaten.filter(k => k.linksRest !== 1 && k.rechtsRest !== 1);
+    const menge = ohneEinzelluecke.length ? ohneEinzelluecke : kandidaten;
+    const abstand = k => {
+      let min = Infinity;
+      for (const b of besetzt) {
+        let d = Infinity;
+        for (const n of k.lauf) {
+          const dd = Math.abs(b.rr - k.rr) * REIHENSCHRITT + Math.abs(b.n - n);
+          if (dd < d) d = dd;
+        }
+        if (d < min) min = d;
+      }
+      return min;
+    };
+    // Ist der Bereich noch ganz leer, ist jeder Abstand unendlich - dann
+    // entscheiden die Nebenkriterien, und der erste Kaeufer bekommt den Platz
+    // vorne in der Mitte.
+    let besterAbstand = -1;
+    for (const k of menge) {
+      const a = abstand(k);
+      if (beste === null || a > besterAbstand) { beste = k; besterAbstand = a; continue; }
+      if (a < besterAbstand) continue;
+      if (k.rr !== beste.rr) { if (k.rr < beste.rr) beste = k; continue; }
+      if (Math.abs(k.mitte - k.reiheMitte) < Math.abs(beste.mitte - beste.reiheMitte)) beste = k;
+    }
+  } else {
+    // ---- Es wird eng: AUFFUELLEN --------------------------------------
+    // Ab hier zaehlt nicht mehr das Bild, sondern dass noch moeglichst viele
+    // Gruppen zusammen sitzen koennen. Deshalb in die Luecke, die am besten
+    // passt, und dort buendig an den Rand - so bleibt der Rest am Stueck.
+    const buendige = kandidaten.filter(k => k.buendig);
+    const menge = buendige.length ? buendige : kandidaten;
+    for (const k of menge) {
+      if (beste === null) { beste = k; continue; }
+      if (k.rest !== beste.rest) { if (k.rest < beste.rest) beste = k; continue; }
+      if (k.rr !== beste.rr) { if (k.rr < beste.rr) beste = k; continue; }
+      if (k.lauf[0] < beste.lauf[0]) beste = k;
+    }
+  }
+
+  return beste.lauf.map(n => ({
+    id: seatId(zone, block, beste.row, n),
+    zone, block, row: beste.row,
+    seat: String(n).padStart(2, "0"),
+    price: seatPrice(zone, block, beste.row)
+  }));
 }
 
 /* ---- Verkaufsuebersicht, NUR fuer den Veranstalter ----------------------
