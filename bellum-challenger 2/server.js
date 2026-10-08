@@ -31,7 +31,14 @@ const {
   SMTP_USER, SMTP_PASS, MAIL_FROM = "BFC Tickets <info@bellumfc.com>",
   // Schluessel fuer die Verkaufsuebersicht des Veranstalters. Ist er nicht
   // gesetzt, gibt es die Uebersicht gar nicht - kein Zugang ohne Absicht.
-  ADMIN_KEY
+  ADMIN_KEY,
+  // Fester Stripe-Artikel fuer dieses Event (prod_...). Nur wenn die Kasse
+  // einen festen Artikel benutzt, laesst sich ein Gutschein in Stripe auf
+  // dieses Event begrenzen ("gilt fuer bestimmte Produkte"). Ein Code wie
+  // "VVK" ist dann an der Samstagskasse nicht einloesbar, weil dort ein
+  // anderer Artikel im Warenkorb liegt.
+  // Ist die Variable nicht gesetzt, bleibt alles wie bisher.
+  STRIPE_PRODUCT_ID
 } = process.env;
 
 function requireEnv(name, val){ if(!val){ console.error(`FEHLT: Umgebungsvariable ${name} ist nicht gesetzt.`); process.exit(1); } }
@@ -302,6 +309,11 @@ const REIHENSCHRITT = 2;
 // Bereich, in dem es auffaellt. Eine Zahl, eine Wirkung: hoeher = mehr
 // verteilt, niedriger = frueher aufgefuellt.
 const VERTEILEN_BIS = 0.40;
+
+// Wie ein Platz auf der Bezahlseite heisst.
+function platzName(s){
+  return `${s.zone} ${s.block} · Reihe ${reiheAnzeige(s.row, s.zone)} · Platz ${parseInt(s.seat,10)}`;
+}
 
 async function waehleNebeneinander(zone, block, anzahl, buyerKey, preis){
   // Doppelt gesichert: ein Abendkassen-Block wird schon im Kaufweg abgewiesen,
@@ -585,11 +597,22 @@ app.post("/api/checkout", async (req, res) => {
         line_items: seatInfos.map(s => ({
           price_data: {
             currency: "eur",
-            product_data: { name: `${s.zone} ${s.block} · Reihe ${reiheAnzeige(s.row, s.zone)} · Platz ${parseInt(s.seat,10)}` },
+            // Mit festem Artikel: Stripe kann einen Gutschein darauf begrenzen.
+            // Ohne: wie bisher, jeder Platz mit eigenem Namen.
+            ...(STRIPE_PRODUCT_ID
+                 ? { product: STRIPE_PRODUCT_ID }
+                 : { product_data: { name: platzName(s) } }),
             unit_amount: s.price
           },
           quantity: 1
         })),
+        // Beim festen Artikel stehen die Plaetze nicht mehr einzeln in der
+        // Liste - deshalb hier als Zeile auf der Bezahlseite, damit der Kunde
+        // vor dem Bezahlen sieht, wo er sitzt.
+        ...(STRIPE_PRODUCT_ID
+             ? { custom_text: { submit: { message:
+                 ("Deine Plätze: " + seatInfos.map(platzName).join("  ·  ")).slice(0, 1000) } } }
+             : {}),
         customer_email: email || undefined,
         allow_promotion_codes: true,
         metadata: { eventId: EVENT_ID, resToken, seatIds: JSON.stringify(seatIds) },
@@ -838,6 +861,13 @@ async function sendTicketMail(email, tickets, sessionId){
 
 // ---- Ticket-Ausstellung nach bestätigter Zahlung ----
 async function fulfillOrder(session){
+  // Wurde ein Gutscheincode eingeloest? Nur protokollieren - hier ist das
+  // erlaubt. So siehst du im Log, wie oft der Vorverkaufscode benutzt wurde.
+  const rabatt = session.total_details?.amount_discount || 0;
+  if (rabatt > 0) {
+    console.log(`Kauf ${session.id}: Gutscheincode eingeloest, ${(rabatt/100).toFixed(2)} EUR Rabatt, bezahlt ${((session.amount_total ?? 0)/100).toFixed(2)} EUR.`);
+  }
+
   const resToken = session.metadata?.resToken;
   let seatIds = [];
   try { seatIds = JSON.parse(session.metadata?.seatIds || "[]"); } catch {}
