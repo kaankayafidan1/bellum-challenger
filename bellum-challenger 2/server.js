@@ -395,7 +395,93 @@ async function waehleNebeneinander(zone, block, anzahl, buyerKey, preis){
       });
     }
   }
-  if (!kandidaten.length) return null;
+  // ------------------------------------------------------------------------
+  //  Kein Platz am Stueck? Dann auf BENACHBARTE REIHEN aufteilen.
+  //
+  //  Manche Bloecke sind schmal: in P14 ist die laengste Reihe der 49-EUR-
+  //  Kategorie acht Stuehle breit. Eine Zehnerbestellung konnte dort selbst im
+  //  leeren Saal nicht bedient werden - der Kunde sah "keine 10 Plaetze
+  //  nebeneinander frei", obwohl 27 Plaetze frei waren.
+  //
+  //  Deshalb jetzt: erst wie bisher alles in EINE Reihe. Geht das nicht, wird
+  //  die Bestellung auf moeglichst WENIGE, direkt aufeinanderfolgende Reihen
+  //  verteilt und dort uebereinander gesetzt - die Gruppe sitzt dann als
+  //  Block hintereinander statt nebeneinander. Erst wenn auch das nicht
+  //  reicht, wird abgelehnt.
+  // ------------------------------------------------------------------------
+  if (!kandidaten.length) {
+    // Freie Strecken je Reihe sammeln (eine Reihe kann mehrere haben).
+    const proReihe = [];
+    for (const r of reihen) {
+      const nummern = r.sitze.slice().sort((a, b) => a - b);
+      const strecken = [];
+      let lauf = [];
+      for (const n of nummern) {
+        if (!vergeben(r.row, n) && (!lauf.length || n === lauf[lauf.length - 1] + 1)) lauf.push(n);
+        else { if (lauf.length) strecken.push(lauf); lauf = vergeben(r.row, n) ? [] : [n]; }
+      }
+      if (lauf.length) strecken.push(lauf);
+      // Pro Reihe zaehlt nur die LAENGSTE zusammenhaengende Strecke. Zwei
+      // getrennte Luecken derselben Reihe zu kombinieren waere ein Loch
+      // mitten in der Gruppe - dann sitzt sie eben nicht zusammen.
+      let beste = null;
+      for (const st of strecken) if (!beste || st.length > beste.length) beste = st;
+      if (beste) proReihe.push({ row: r.row, rr: rang(r.row), beste });
+    }
+    proReihe.sort((a, b) => a.rr - b.rr);
+    if (!proReihe.length) return null;
+
+    // Kleinstes Fenster aufeinanderfolgender Reihen, das die Bestellung fasst.
+    let fenster = null;
+    for (let i = 0; i < proReihe.length; i++) {
+      let summe = 0;
+      for (let j = i; j < proReihe.length; j++) {
+        // Nur wirklich benachbarte Reihen - keine Luecke ueberspringen.
+        if (j > i && proReihe[j].rr !== proReihe[j-1].rr + 1) break;
+        summe += proReihe[j].beste.length;
+        if (summe >= anzahl) {
+          const breite = j - i;
+          if (!fenster || breite < fenster.breite || (breite === fenster.breite && proReihe[i].rr < fenster.von))
+            fenster = { i, j, breite, von: proReihe[i].rr };
+          break;
+        }
+      }
+    }
+    if (!fenster) return null;
+
+    // Auffuellen: je Reihe die laengste Strecke zuerst, und darin das Stueck,
+    // das moeglichst senkrecht unter dem ersten Teil liegt.
+    const gewaehlt = [];
+    let offen = anzahl, zielMitte = null;
+    for (let k = fenster.i; k <= fenster.j && offen > 0; k++) {
+      const st = proReihe[k].beste;
+      const nimm = Math.min(offen, st.length);
+      let start;
+      if (zielMitte === null) start = Math.floor((st.length - nimm) / 2);
+      else {
+        // Das Stueck waehlen, das moeglichst senkrecht unter dem ersten liegt.
+        let bester = 0, bestAbstand = Infinity;
+        for (let i = 0; i + nimm <= st.length; i++) {
+          const d = Math.abs((st[i] + st[i + nimm - 1]) / 2 - zielMitte);
+          if (d < bestAbstand) { bestAbstand = d; bester = i; }
+        }
+        start = bester;
+      }
+      const teil = st.slice(start, start + nimm);
+      if (zielMitte === null) zielMitte = (teil[0] + teil[teil.length - 1]) / 2;
+      for (const n of teil) gewaehlt.push({ row: proReihe[k].row, rr: proReihe[k].rr, n });
+      offen -= nimm;
+    }
+    if (offen > 0) return null;
+
+    gewaehlt.sort((a, b) => a.rr - b.rr || a.n - b.n);
+    return gewaehlt.map(g => ({
+      id: seatId(zone, block, g.row, g.n),
+      zone, block, row: g.row,
+      seat: String(g.n).padStart(2, "0"),
+      price: seatPrice(zone, block, g.row)
+    }));
+  }
 
   let beste = null;
 
