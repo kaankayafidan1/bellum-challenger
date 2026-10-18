@@ -107,13 +107,28 @@ const BLOCKED_ROWS = new Set([
   // leer: keine Reihe gesperrt
 ]);
 
-// Einzelne PLAETZE sperren.  Format: "Zone|Block|Reihe|Platz" (Platz zweistellig)
-//   Diese Plaetze sind fuer die Kunden reserviert, die ihr Ticket noch fuer die
-//   ring°arena gekauft haben. Sie bleiben unverkaeuflich, bis die Umbuchung steht.
-//   Erzeugt aus gesperrt.json - nicht von Hand aendern.
-const BLOCKED_SEATS = new Set([
-  // leer: der Saal startet vollstaendig frei
+// HANDKARTEN: Plaetze, fuer die von Hand ein Ticket ausgegeben wurde. Sie sind
+//   damit vergeben - nicht online und auch nicht an der Abendkasse. Die
+//   Platznummer ist IMMER zweistellig ("01", nicht "1"): sonst greift die
+//   Sperre nicht und der Platz wird ein zweites Mal verkauft.
+//
+//   18.10.2026: eine Karte Reihe 1 in P2, von Hand ausgegeben.
+const HANDKARTEN = new Set([
+  "Innenraum|P2|A|01"
 ]);
+
+// Einzelne PLAETZE sperren.  Format: "Zone|Block|Reihe|Platz" (Platz zweistellig)
+//   Alles, was nicht online verkauft werden soll. Die Handkarten gehoeren dazu.
+const BLOCKED_SEATS = new Set([...HANDKARTEN]);
+
+// Warum ist ein einzelner Platz gesperrt? Die Uebersicht und die Abendkasse
+// muessen eine Handkarte von einem bloss nicht angebotenen Platz unterscheiden
+// koennen: auf der Handkarte sitzt jemand, der andere ist noch verkaeuflich.
+function sperrGrund(zone, block, row, seat){
+  const k = `${zone}|${block}|${row}|${String(seat).padStart(2,"0")}`;
+  if(HANDKARTEN.has(k)) return "handkarte";
+  return null;
+}
 
 function isBlocked(zone, block){ return BLOCKED.has(zone + "|" + block); }
 function isRowBlocked(zone, block, row){ return BLOCKED_ROWS.has(`${zone}|${block}|${row}`); }
@@ -152,6 +167,6 @@ function allBlocks(){
 export {
   LAYOUT, innenraumRowPrice, seatPrice, seatsOf, seatId,
   blockPriceRange, allBlocks,
-  BLOCKED, BLOCKED_ROWS, BLOCKED_SEATS,
-  isBlocked, isRowBlocked, isSeatBlocked, seatExists
+  BLOCKED, BLOCKED_ROWS, BLOCKED_SEATS, HANDKARTEN,
+  isBlocked, isRowBlocked, isSeatBlocked, seatExists, sperrGrund
 };

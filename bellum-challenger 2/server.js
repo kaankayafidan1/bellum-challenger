@@ -14,7 +14,7 @@ import QRCode from "qrcode";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
-import { allBlocks, seatsOf, seatId, seatPrice, blockPriceRange, isBlocked, isRowBlocked, isSeatBlocked, BLOCKED_SEATS} from "./seats-maritim.js";
+import { allBlocks, seatsOf, seatId, seatPrice, blockPriceRange, isBlocked, isRowBlocked, isSeatBlocked, BLOCKED_SEATS, sperrGrund} from "./seats-maritim.js";
 // Gestaltung der Eintrittskarte: Bilder, Schriften und Layout des Designpakets.
 // Fehlt eine dieser Dateien, startet der Server gar nicht erst - besser als
 // stillschweigend unfertige Tickets auszugeben.
@@ -38,8 +38,18 @@ const {
   // "VVK" ist dann an der Samstagskasse nicht einloesbar, weil dort ein
   // anderer Artikel im Warenkorb liegt.
   // Ist die Variable nicht gesetzt, bleibt alles wie bisher.
-  STRIPE_PRODUCT_ID
+  STRIPE_PRODUCT_ID,
+  // Onlineverkauf offen? Alles ausser "nein" laesst den Verkauf laufen - die
+  // Variable muss also nicht gesetzt sein. Auf "nein" gestellt nimmt die Kasse
+  // keine Bestellungen mehr an, die Seite bleibt aber erreichbar. Das ist
+  // wichtig, weil die Abendkassen-Ansicht von diesem Server kommt: den Dienst
+  // einfach abzuschalten wuerde sie mit abschalten.
+  //
+  // Steht hier seit dem 18.10.2026 auf "nein": der Onlineverkauf ist beendet,
+  // Karten gibt es nur noch an der Abendkasse. Wieder oeffnen heisst: "ja".
+  VERKAUF_OFFEN = "nein"
 } = process.env;
+const verkaufOffen = String(VERKAUF_OFFEN).trim().toLowerCase() !== "nein";
 
 function requireEnv(name, val){ if(!val){ console.error(`FEHLT: Umgebungsvariable ${name} ist nicht gesetzt.`); process.exit(1); } }
 requireEnv("STRIPE_SECRET_KEY", STRIPE_SECRET_KEY);
@@ -219,8 +229,15 @@ app.get("/api/blocks", async (req, res) => {
       const reihen = new Set();          // Reihen, die ueberhaupt verkauft werden
       for (const s of seatsOf(b.zone, b.name)) {
         if (isRowBlocked(b.zone, b.name, s.row)) continue;
-        if (isSeatBlocked(b.zone, b.name, s.row, s.seat)) continue;
+        // Eine Reihe gilt als "im Verkauf", sobald sie nicht als GANZE Reihe
+        // gesperrt ist. Einzeln gesperrte Plaetze - Handkarten - zaehlen hier
+        // bewusst NICHT mit. Sonst verschwindet eine Reihe, deren Plaetze
+        // zufaellig alle von Hand vergeben wurden, komplett aus dem
+        // Kaeuferplan, und das sieht aus wie "da ist nichts mehr zu holen".
+        // Kaufen kann die Plaetze trotzdem niemand - die Zuteilung
+        // ueberspringt jeden gesperrten Stuhl.
         reihen.add(s.row);
+        if (isSeatBlocked(b.zone, b.name, s.row, s.seat)) continue;
         const p = seatPrice(b.zone, b.name, s.row);
         stufen.set(p, (stufen.get(p) || 0) + 1);
         if (voll) {
@@ -265,7 +282,7 @@ app.get("/api/blocks", async (req, res) => {
     // Browser. Die Seite hatte sie ausgegraut - als graue Luecken mitten in
     // einer Reihe sahen sie aus wie eben verkaufte Plaetze.
     res.set("Cache-Control", "no-store");
-    res.json({ eventId: EVENT_ID, blocks, kategorien });
+    res.json({ eventId: EVENT_ID, blocks, kategorien, verkaufOffen });
   } catch (e) {
     console.error("Fehler bei /api/blocks:", e);
     res.status(500).json({ error: "Konnte Blöcke nicht laden" });
@@ -570,13 +587,27 @@ app.get("/api/admin/belegung", async (req, res) => {
     const belegung = {};
     const bloecke = [];
     let verkauft = 0, reserviert = 0, gesperrt = 0, frei = 0, umsatz = 0, offenerWert = 0;
+    let umgebucht = 0, handkarten = 0;
 
     for (const b of allBlocks()) {
-      let bVerkauft = 0, bRes = 0, bGesperrt = 0, bFrei = 0;
+      let bVerkauft = 0, bRes = 0, bGesperrt = 0, bFrei = 0, bUmgebucht = 0, bHand = 0;
       const blockZu = isBlocked(b.zone, b.name);
       for (const s of seatsOf(b.zone, b.name)) {
         const id = seatId(b.zone, b.name, s.row, s.seat);
         const preis = seatPrice(b.zone, b.name, s.row);
+        // Einzeln gesperrte Plaetze bekommen ihren GRUND mit. Sonst sind sie
+        // in der Uebersicht nicht von einem zugesperrten Block zu
+        // unterscheiden - dabei sitzt auf einer Handkarte jemand, waehrend ein
+        // gesperrter Block leer bleibt. Die Abendkasse braucht den
+        // Unterschied: einen Handkartenplatz darf sie nicht noch einmal
+        // verkaufen, einen bloss nicht online angebotenen schon.
+        const grund = sperrGrund(b.zone, b.name, s.row, s.seat);
+        if (grund === "umgebucht") {
+          belegung[id] = "umgebucht"; umgebucht++; bUmgebucht++; continue;
+        }
+        if (grund === "handkarte") {
+          belegung[id] = "handkarte"; handkarten++; bHand++; continue;
+        }
         if (blockZu || isRowBlocked(b.zone, b.name, s.row)
             || isSeatBlocked(b.zone, b.name, s.row, s.seat)) {
           belegung[id] = "gesperrt"; gesperrt++; bGesperrt++; continue;
@@ -588,11 +619,13 @@ app.get("/api/admin/belegung", async (req, res) => {
         else { frei++; bFrei++; offenerWert += preis; }
       }
       bloecke.push({ zone: b.zone, name: b.name, verkauft: bVerkauft,
-                     reserviert: bRes, gesperrt: bGesperrt, frei: bFrei });
+                     reserviert: bRes, gesperrt: bGesperrt, frei: bFrei,
+                     umgebucht: bUmgebucht, handkarten: bHand });
     }
     res.set("Cache-Control", "no-store");
     res.json({ belegung, bloecke, stand: now,
-               summe: { verkauft, reserviert, gesperrt, frei, umsatz, offenerWert } });
+               summe: { verkauft, reserviert, gesperrt, frei, umsatz, offenerWert,
+                        umgebucht, handkarten } });
   } catch (e) {
     console.error("Fehler bei /api/admin/belegung:", e);
     res.status(500).json({ error: "Konnte die Übersicht nicht laden" });
@@ -601,6 +634,12 @@ app.get("/api/admin/belegung", async (req, res) => {
 
 // ---- Checkout: Block + Anzahl waehlen, der Server sucht die Plaetze ----
 app.post("/api/checkout", async (req, res) => {
+  if (!verkaufOffen) {
+    return res.status(403).json({
+      error: "Der Onlineverkauf ist beendet. Tickets gibt es an der Abendkasse.",
+      grund: "verkauf_zu"
+    });
+  }
   try {
     const { zone, block, email } = req.body || {};
     const anzahl = Number(req.body?.anzahl);
@@ -1115,4 +1154,5 @@ process.on("unhandledRejection", (err) => {
 app.listen(PORT, () => {
   console.log(`Ticket-Verkaufsserver (feste Platzwahl) läuft auf Port ${PORT}`);
   console.log(`Öffentliche URL: ${PUBLIC_URL}`);
+  console.log(verkaufOffen ? "Onlineverkauf: OFFEN" : "Onlineverkauf: GESCHLOSSEN (VERKAUF_OFFEN=nein)");
 });
