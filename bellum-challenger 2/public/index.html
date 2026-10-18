@@ -729,6 +729,20 @@ function statusOf(s){ return BELEGUNG[sid(s)] || "frei"; }
 function eur(c){ return (c/100).toLocaleString("de-DE",
   {minimumFractionDigits:0,maximumFractionDigits:2}) + " €"; }
 
+/* ---- Abendkassenaufschlag -------------------------------------------------
+   An der Abendkasse kostet jede Karte 10 € mehr als im Vorverkauf.
+   Gerechnet und sortiert wird weiter mit dem VORVERKAUFSPREIS des Platzes:
+   der sagt, zu welcher Kategorie ein Stuhl gehoert und welche Farbe er im
+   Plan traegt. Der Aufschlag kommt erst dort dazu, wo ein Preis ANGEZEIGT
+   oder Geld GEZAEHLT wird.
+
+   Abgefragt wird die Klasse am body und nicht kasseKey: dieser Wert wird
+   schon beim Aufbau des Saalplans gebraucht, lange bevor kasseKey weiter
+   unten ueberhaupt angelegt ist. */
+const KASSE_AUFSCHLAG = 1000;
+const kassenAufschlag = () =>
+  document.body.classList.contains("kassenbetrieb") ? KASSE_AUFSCHLAG : 0;
+
 const seatById   = new Map(SEATS.map(s => [s.id, s]));
 // Preisstufen, die ueber die Legende ausgeblendet sind. Frueh deklariert, damit
 // Maus UND Tastatur denselben Filter sehen.
@@ -1701,7 +1715,7 @@ function hover(e){
     const b = document.createElement("b"); b.textContent = seatLabel(s);
     const sp = document.createElement("span");
     sp.className = st === "frei" ? "p" : "st";
-    sp.textContent = st === "frei" ? eur(s.p)
+    sp.textContent = st === "frei" ? eur(s.p + kassenAufschlag())
       : st === "verkauft" ? "verkauft"
       : st === "gesperrt" ? "nicht verfügbar"     // wird nie frei - nicht "reserviert"
       : "gerade reserviert";
@@ -1731,8 +1745,9 @@ function hover(e){
   if(!gesperrteBloecke.has(b.id)){
     const t2 = document.createElement("span");
     t2.className = "p";
-    const pMin = b.offenMin === undefined ? b.pmin : b.offenMin;
-    const pMax = b.offenMax === undefined ? b.pmax : b.offenMax;
+    const auf  = kassenAufschlag();
+    const pMin = (b.offenMin === undefined ? b.pmin : b.offenMin) + auf;
+    const pMax = (b.offenMax === undefined ? b.pmax : b.offenMax) + auf;
     t2.textContent = pMin === pMax ? eur(pMin) : "ab " + eur(pMin);
     // Keine Platzzahl im Tooltip. Gemeint waere die Groesse des Blocks, gelesen
     // wird sie als "so viele sind noch frei".
@@ -2200,7 +2215,8 @@ function adminZahlen(){
       if(st === "verkauft" || st === "reserviert" || st === "umgebucht" || st === "handkarte"){
         weg++; continue;
       }
-      if(istKasse(sx)){ n++; summe += sx.p; continue; }
+      // Eingenommen wurde der Abendkassenpreis, nicht der Vorverkaufspreis.
+      if(istKasse(sx)){ n++; summe += sx.p + KASSE_AUFSCHLAG; continue; }
       verkaufbar++;
     }
     const online = z.verkauft || 0;
@@ -2338,6 +2354,9 @@ if(kasseKey){
   const kfFuss  = document.getElementById("kfFuss");
 
   let kbZiel = null, kbPreis = null, kbAnzahl = 1;
+  /* kbPreis ist IMMER der Vorverkaufspreis - er ist der Schluessel zur
+     Kategorie und zur Farbe. Was der Gast zahlt, steht hier. */
+  const kassePreis = p => p + KASSE_AUFSCHLAG;
 
   /** Alle Stuehle eines Blocks. "Empore vorne" ist im Plan in vier Abschnitte
       geteilt, verkauft wird sie aber als EIN Block - genau wie im Kaufweg. */
@@ -2388,7 +2407,7 @@ if(kasseKey){
       const i = document.createElement("i");
       i.style.background = COLORS[String(k.preis/100)] || "#ccc";
       const t = document.createElement("span");
-      t.textContent = eur(k.preis);
+      t.textContent = eur(kassePreis(k.preis));
       const r = document.createElement("span");
       r.className = "rest";
       r.textContent = k.frei ? "noch " + k.frei + " frei" : "nichts mehr frei";
@@ -2410,7 +2429,7 @@ if(kasseKey){
     const gewaehlt = liste.find(x => x.preis === kbPreis);
     kfJa.disabled = !gewaehlt || !gewaehlt.frei;
     kfJa.textContent = gewaehlt
-      ? kbAnzahl + " × " + eur(kbPreis) + " verkauft"
+      ? kbAnzahl + " × " + eur(kassePreis(kbPreis)) + " verkauft"
       : "Kategorie wählen";
 
     // Fusszeile: was an dieser Kasse in diesem Block schon weg ist
@@ -2437,7 +2456,7 @@ if(kasseKey){
     kbPreis  = ersteFreie ? ersteFreie.preis : null;
     kbAnzahl = 1;
     kfTitel.textContent = "An der Abendkasse verkaufen";
-    kfPreis.textContent = "Freie Platzwahl im Block – kein fester Stuhl";
+    kfPreis.textContent = "Freie Platzwahl im Block · Abendkassenpreis (10 € über Vorverkauf)";
     kfZeichnen();
     kfEl.classList.remove("hidden");
     kfJa.focus();
@@ -2469,8 +2488,11 @@ if(kasseKey){
       /* "wahl: frei" haelt fest, dass hier kein bestimmter Platz verkauft
          wurde, sondern nur Block und Kategorie. Der Stuhl ist nur die
          Buchhaltung dahinter. */
+      /* "kategorie" bleibt der Vorverkaufspreis - daran haengen Farbe und
+         Zuordnung. "bezahlt" ist, was der Gast an der Kasse gegeben hat. */
       const eintrag = { at: jetzt, platz: sid(s), block: kbZiel.key,
-                        kategorie: kbPreis, wahl: "frei" };
+                        kategorie: kbPreis, bezahlt: kassePreis(kbPreis),
+                        wahl: "frei" };
       KASSE[k] = eintrag;
       const n = seatNodes.get(s.id);
       if(n) n.classList.add("a-kasse");
@@ -2478,7 +2500,7 @@ if(kasseKey){
     }
     kasseSichern();
     adminZahlen();
-    const text = kbAnzahl + " × " + eur(kbPreis) + " · " + blockName(kbZiel)
+    const text = kbAnzahl + " × " + eur(kassePreis(kbPreis)) + " · " + blockName(kbZiel)
                + " · freie Platzwahl";
     kasseHinweis("Verkauft: " + text, false);
     kfZu();
